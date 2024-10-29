@@ -1,0 +1,418 @@
+#================= Initialise ==================
+library(ggplot2)
+library(tidyr)
+library(car)
+library(ggrepel)
+library(utils)
+#devtools::install_github("izaopenshaw/WoodlandCarbonCode", force = TRUE) # force = TRUE to install updates
+library(WoodlandCarbonCode)
+
+#================= Import Stem maps ==================
+setwd("C:/Users/ipr10kg/OneDrive - The Royal Botanic Gardens, Kew/tree_attributes_qsm/edits")
+plot5  <- read.csv("sssi-plot5.tree-attributes.csv")
+plot6  <- read.csv("sssi-plot6-tree-attributes.csv")
+plot8  <- read.csv("sssi-plot8-11-tree-attributes.csv")
+plot9  <- read.csv("sssi-plot9-10-tree-attributes.csv")
+plot12 <- read.csv("sssi-plot12-tree-attributes.csv")
+plot16 <- read.csv("sssi-plot16-17-tree-attributes.csv")
+plot18 <- read.csv("sssi-plot18-tree-attributes.csv")
+
+# Plot sizes
+setwd("C:/Users/ipr10kg/OneDrive - The Royal Botanic Gardens, Kew/Documents/SOF/Plot IDs")
+plot_areas <- read.csv("SSSI_Plot_Areas.csv")
+
+setwd("C:/Users/ipr10kg/OneDrive - The Royal Botanic Gardens, Kew/Documents/Methodology")
+conifer <- read.csv("OG_Data/QSM_conifer.csv")
+coppice <- read.csv("OG_Data/QSM_Pearceland.csv")
+
+# Create new columns for plots
+coppice$plot <- NA  ;  conifer$plot <- NA
+plot5$plot <- 5     ;  plot6$plot <- 6
+plot8$plot <- 8     ;  plot9$plot <- 9
+plot12$plot <- 12   ;  plot16$plot <- 16
+plot18$plot <- 18
+
+broadleaf <- rbind(plot5, plot6, plot8, plot9, plot12, plot16, plot18)
+rm(plot5, plot6, plot8, plot9, plot12, plot16, plot18) # clean environment
+
+# Only include trees which are in plot
+broadleaf <- broadleaf[broadleaf$in_plot == "TRUE",]
+
+# Add plot sizes
+broadleaf$plot_area <- plot_areas$plot_area_ha[match(broadleaf$plot, plot_areas$Plot_ID)]
+conifer$plot_area <- coppice$plot_area <- NA
+
+# Create new columns for Habitat
+conifer$Habitat <- "conifer"       ;    coppice$Habitat <- "coppice"
+broadleaf$Habitat <- "broadleaf"   ;    broadleaf$Classification <- "broadleaf"
+
+# Collate Habitats into one data frame
+df <-          cbind(conifer$genus, conifer$species, conifer$DBHqsm, conifer$DBHcyl, conifer$TreeHeight, conifer$Habitat, conifer$plot, conifer$Classification, conifer$TotalVolume_opt, conifer$TotalVolume_std, conifer$hull_volume, conifer$plot_area, conifer$plot, conifer$tree)
+df <- rbind(df,cbind(coppice$Genus, coppice$species, coppice$DBHqsm, coppice$DBHcyl, coppice$TreeHeight, coppice$Habitat, coppice$plot, coppice$Classification, coppice$TotalVolume_opt, coppice$TotalVolume_std, coppice$hull_volume, coppice$plot_area, coppice$dbh_manual, coppice$tree))
+df <- rbind(df,cbind(broadleaf$genus, broadleaf$species, broadleaf$DBHqsm, broadleaf$DBHcyl, broadleaf$TreeHeight, broadleaf$Habitat, broadleaf$plot, broadleaf$Classification, broadleaf$TotalVolume_opt, broadleaf$TotalVolume_std, broadleaf$hull_volume, broadleaf$plot_area, broadleaf$dbh, broadleaf$tree))
+df <- as.data.frame(df)
+colnames(df) <- c("Genus","Species","DBHqsm", "DBHcyl", "Height","Habitat", "Plot", "Classification","TotalVolume_opt","TotalVolume_std", "Crown_Area", "Plot_Area", "DBH_manual", "treeID")
+
+#======Classes======
+sapply(df, class)
+for (col in c("DBHqsm", "DBHcyl", "Height", "TotalVolume_opt", "TotalVolume_std", "Crown_Area", "DBH_manual")) {
+  df[[col]] <- as.numeric(df[[col]])
+}
+df$Habitat  <- as.factor(df$Habitat)
+df$Genus  <- as.factor(df$Genus)
+df$Species  <- as.factor(df$Species)
+
+# Take the average of DBHqsm and DBHcyl for DBH
+# DBHqsm DBH (m), the diameter of the cylinder in the QSM at the right height
+# DBHcyl DBH (m), the diameter of the cylinder fitted to the height 1.1-1.5 m
+df$DBH <- (df$DBHcyl+df$DBHqsm)/2
+
+# Remove DBH < 0.1 and NA
+df <- df[!df$DBH < 0.1 & !is.na(df$DBH),]
+
+# Convert DBH to cm
+df$DBH <- as.numeric(df$DBH)*100
+
+# Indexes for reference
+df$ID <- 1:nrow(df)
+
+#================= Calculate carbon using Biomass.R & allodb.R ==================
+coords <- c(-0.088837,51.071610)
+df <- biomass(df, coords, region="Europe", output.all = TRUE)
+df <- allodb(df, coords, output.all = TRUE)
+
+# Convert from biomass to carbon using the Carbon Volatile Fraction
+df$CVF[df$Classification=="broadleaf"] <- 48.8
+df$CVF[df$Classification=="coniferous"] <- 50.8 # Error = 0.6
+# Thomas, Sean C., and Adam R. Martin. "Carbon content of tree tissues: a synthesis." Forests 3.2 (2012): 332-352. https://www.mdpi.com/1999-4907/3/2/332.
+
+df$AGC_Biomass <- df$AGB_Biomass_kg*0.001*df$CVF
+df$AGC_allodb  <- df$AGB_allodb_kg*0.001*df$CVF
+df$allodb_sd <- df$allodb_sigma*0.001*df$CVF
+df$AGC_TLS <- df$TotalVolume_opt/1000*df$CVF
+df$TLS_sd  <- df$TotalVolume_std/1000*df$CVF
+
+#================= Calculate carbon using WCC ==================
+df$Classification[df$Classification == "coniferous"] <- "conifer"
+sp_codes <- lookspcode(as.character(df$Name), df$Classification, returnv = 'single')
+carbon <- fc_agc(sp_codes$spcode, df$DBH, df$Height)
+
+#==================== Plots ====================
+# Coefficient of Variation from TLS
+df$CV <- df$TotalVolume_std/df$TotalVolume_opt
+plot(df$TotalVolume_opt, df$CV)
+plot(df$TotalVolume_opt, df$TotalVolume_std)
+
+ggplot(df, aes(x=TotalVolume_opt, y=CV))+
+  geom_point(aes(colour = Habitat, alpha=0.5))
+
+# Histograms
+hist(conifer$DBHqsm, breaks=50)
+hist(broadleaf$DBHqsm, breaks=50)
+hist(coppice$DBHqsm, breaks=50)
+
+# *??
+df$TLS_sd  <- sqrt(df$TotalVolume_std)/1000
+
+df$AGC_TLS[is.na(df$AGC_TLS)] <- 0
+df$TLS_sd[is.na(df$TLS_sd)] <- 0
+
+df$AGC_TLS[is.na(df$AGC_TLS)] <- 0
+df$TLS_sd[is.na(df$TLS_sd)] <- 0
+
+totals <- aggregate(cbind(Biomass=df$AGC_Biomass,      allodb=df$AGC_allodb,
+                          WCC=df$AGC_WCC,              TLS=df$AGC_TLS,
+                          sigma=sqrt(df$allodb_sigma), TLS_sd=sqrt(df$TLS_sd)),
+                    by = list(Habitat=df$Habitat), FUN = sum)
+totals
+long <- totals %>% pivot_longer(cols = c(Biomass, allodb, WCC, TLS), names_to = "Method",values_to = "Carbon")
+long
+
+#reshape(totals,direction = "long",varying = list(names(totals)[2:4]),v.names = "Value",timevar = "Habitat")
+long <- as.data.frame(long)
+long$sigma <- sqrt(long$sigma)
+long$Carbon_per_ha <- NA
+
+confier_area <- 3923.4 + 6524 # m^2
+
+# Convert biomass estimates to per unit hectar by dividing by habitat area
+for(i in 1:nrow(long)){
+  if(long$Habitat[i] == "broadleaf"){
+    long$Carbon_per_ha[i] <- long$Carbon[i]/sum(plot_areas$plot_area_ha)
+    long$sigma[i] <- long$sigma[i]/sum(plot_areas$plot_area_ha)
+  }
+  if(long$Habitat[i] == "conifer"){
+    long$Carbon_per_ha[i] <- long$Carbon[i]/conifer_area_ha
+    long$sigma[i] <- long$sigma[i]/conifer_area_ha
+  }
+  if(long$Habitat[i] == "coppice"){
+    long$Carbon_per_ha[i] <- long$Carbon[i]/coppice_area_ha
+    long$sigma[i] <- long$sigma[i]/coppice_area_ha
+  }
+}
+long$Carbon_per_ha <- round(long$Carbon_per_ha,1)
+
+# Carbon per habitat per method Barplot
+ggplot(long, aes(y=Carbon_per_ha, x=Habitat))+
+  geom_bar(stat="identity", width=0.5, fill="forest green")+
+  geom_text(aes(label=Carbon_per_ha), vjust=-0.3, size=3.5)+
+  facet_grid(~Method)
+#+geom_errorbar(aes(ymin=Carbon_per_ha-sigma, ymax=Carbon_per_ha+sigma), width=.2,position=position_dodge(.9))
+
+# TLS Carbon Barplot
+TLS <- long[long$Method=="TLS",]
+TLS$Habitat <- as.character(TLS$Habitat)
+TLS[4,] <- c(as.factor("meadow"), 0,0,"TLS",0,0)
+sapply(TLS, class)
+TLS$sigma <- as.numeric(TLS$sigma)
+TLS$Carbon_per_ha  <- as.numeric(TLS$Carbon_per_ha)
+TLS$Habitat  <- as.factor(TLS$Habitat)
+
+TLS$Habitat <- factor(TLS$Habitat, levels = c("broadleaf", "conifer", "coppice", "meadow"))
+TLS$Habitat[4] <- "meadow"
+ggplot(TLS, aes(y=Carbon_per_ha, x=Habitat))+
+  geom_bar(stat="identity", width=0.5, fill="#56B4E9")+
+  geom_text(aes(label=Carbon_per_ha), vjust=-0.3, size=3.5)+
+  geom_errorbar(aes(ymin=Carbon_per_ha-sigma, ymax=Carbon_per_ha+sigma), width=.2,position=position_dodge(.9))+
+  ylab("Carbon per hectar")
+
+# Wood density
+ggplot(df, aes(WD, Wood_Density,label = rownames(df)))+
+  geom_text(position=position_jitter(height=0.01))
+
+# Export Data tables
+setwd("C:/Users/ipr10kg/OneDrive - The Royal Botanic Gardens, Kew/Documents/Methodology")
+#write.csv(long, "long.csv")
+write.csv(df, "Output_Data/Output_080324.csv")
+
+# Testing a subset
+subset <- df[c(1,139,230,560,700,800),]
+
+ggplot(subset, aes(y=AGC_Biomass, x=Name))+
+  geom_bar(stat="identity", width=0.5, fill="forest green")+
+  geom_text(aes(label=AGC_Biomass), vjust=-0.3, size=3.5)+
+  geom_errorbar(aes(ymin=AGC_Biomass-error_biomass, ymax=AGC_Biomass+error_biomass), width=.2,position=position_dodge(.9))
+
+
+#============ QSM Error ============
+write.csv(df, "Output_Data/estimates_25_9_24.csv")
+df <- read.csv("Output_Data/estimates_25_9_24.csv")
+
+broadlf <- df[df$Habitat == "broadleaf",]
+confr <- df[df$Habitat == "conifer",]
+coppc <- df[df$Habitat == "coppice",]
+
+n_iterations <- 10000  # TODO: do values level out?
+
+# Empty list to store total carbon for each habitat
+total_carbon_estimates <- list()
+
+# Function to calculate total carbon per hectare using Markov Chain
+calculate_total_carbon_per_hectare <- function(sub_df, habitat_area_ha) {
+  n_trees <- nrow(sub_df)
+  total_carbon_chain <- numeric(n_iterations)
+
+  # Initialize with the sum of AGC_TLS values (mean)
+  total_carbon_chain[1] <- sum(sub_df$AGC_TLS) / habitat_area_ha  # Convert to per hectare
+
+  # Run the Markov Chain for the given habitat
+  for (i in 2:n_iterations) {
+    sampled_carbon <- rnorm(n_trees, mean = sub_df$AGC_TLS, sd = sub_df$TLS_sd)
+    new_carbon <- sum(sampled_carbon) / habitat_area_ha  # Convert to per hectare
+    # Reject negative total carbon values
+    if (new_carbon >= 0) {
+      total_carbon_chain[i] <- new_carbon
+    } else {
+      total_carbon_chain[i] <- total_carbon_chain[i-1]  # Stay in the previous state
+    }
+  }
+
+  return(total_carbon_chain)
+}
+
+total_carbon_estimates$conifer <- calculate_total_carbon_per_hectare(df[df$Habitat == "conifer", ], conifer_area_ha)
+total_carbon_estimates$coppice <- calculate_total_carbon_per_hectare(df[df$Habitat == "coppice", ], coppice_area_ha)
+
+# Function to calculate total carbon for broadleaf habitat using plot data and plot areas
+calculate_broadleaf_total_carbon <- function(sub_df, broadleaf_area_ha, plot_areas) {
+  # Merge sub_df with plot_areas to get the correct plot area for each plot
+  merged_df <- merge(sub_df, plot_areas, by.x = "Plot", by.y = "Plot_ID")
+
+  n_plots <- nrow(merged_df)
+  total_carbon_chain <- numeric(n_iterations)
+
+  # Initialize with the mean of the total carbon per hectare across all plots
+  plot_carbon_per_ha <- merged_df$AGC_TLS / merged_df$plot_area_ha  # Carbon per hectare in each plot
+  total_carbon_chain[1] <- mean(plot_carbon_per_ha) * broadleaf_area_ha  # Scale to total habitat area
+
+  # Run the Markov Chain for the broadleaf habitat
+  for (i in 2:n_iterations) {
+    sampled_carbon <- rnorm(n_plots, mean = merged_df$AGC_TLS, sd = merged_df$TLS_sd)
+    sampled_carbon_per_ha <- sampled_carbon / merged_df$plot_area_ha
+    new_carbon <- mean(sampled_carbon_per_ha) * broadleaf_area_ha  # Scale to total habitat area
+    # Reject negative total carbon values
+    if (new_carbon >= 0) {
+      total_carbon_chain[i] <- new_carbon
+    } else {
+      total_carbon_chain[i] <- total_carbon_chain[i-1]  # Stay in the previous state
+    }
+  }
+
+  return(total_carbon_chain)
+}
+
+# Extract broadleaf habitat data from df
+broadleaf_plot_df <- df[df$Habitat == "broadleaf", ]
+
+# Calculate total carbon estimates for broadleaf habitat using plot data and matching plot areas
+total_carbon_estimates$broadleaf <- calculate_broadleaf_total_carbon(broadleaf_plot_df, broadleaf_area_ha, plot_areas)
+
+# ========== Summarize the results for carbon per hectare ==========
+summary_results_MC <- data.frame(Habitat = c("Conifer", "Coppice", "Broadleaf"),
+                                 Mean_Carbon_per_Ha = c(mean(total_carbon_estimates$conifer),
+                                                        mean(total_carbon_estimates$coppice),
+                                                        mean(total_carbon_estimates$broadleaf)/0.59593),
+                                 SD_Carbon_per_Ha = c(sd(total_carbon_estimates$conifer)*2,
+                                                      sd(total_carbon_estimates$coppice)*2,
+                                                      sd(total_carbon_estimates$broadleaf)*2))
+
+summary_results <- data.frame(Habitat = c("Conifer", "Coppice", "Broadleaf"),
+                              Carbon_per_Ha = c(sum(df[df$Habitat == "conifer", ]$AGC_TLS) / conifer_area_ha,
+                                                sum(df[df$Habitat == "coppice", ]$AGC_TLS) / coppice_area_ha,
+                                                sum(df[df$Habitat == "broadleaf", ]$AGC_TLS, na.rm = TRUE) / broadleaf_area_ha),
+                              SD_Carbon_per_Ha = c(sqrt(sum(df[df$Habitat == "conifer", ]$TLS_sd/ conifer_area_ha^2))*2 ,
+                                                   sqrt(sum(df[df$Habitat == "coppice", ]$TLS_sd/ coppice_area_ha^2))*2 ,
+                                                   sqrt(sum(df[df$Habitat == "broadleaf", ]$TLS_sd^2/ broadleaf_area_ha, na.rm = TRUE)))*2 )
+
+print(summary_results)
+print(summary_results_MC)
+
+total_AGC <- data.frame(Habitat = c("Conifer", "Coppice", "Broadleaf"),
+                        Carbon_per_Ha = c(sum(df[df$Habitat == "conifer", ]$AGC_TLS),
+                                          sum(df[df$Habitat == "coppice", ]$AGC_TLS),
+                                          sum(df[df$Habitat == "broadleaf", ]$AGC_TLS, na.rm = TRUE),
+                                          SD_Carbon_per_Ha = c(sqrt(sum(df[df$Habitat == "conifer", ]$TLS_sd^2))*2,
+                                                               sqrt(sum(df[df$Habitat == "coppice", ]$TLS_sd^2))*2,
+                                                               sqrt(sum(df[df$Habitat == "broadleaf", ]$TLS_sd^2, na.rm = TRUE)))*2)
+
+
+                        # Plot
+                        carbon_chain_df <- data.frame(Habitat = rep(c("Conifer", "Coppice", "Broadleaf"), each = n_iterations),
+                                                      Total_Carbon_per_Ha = c(total_carbon_estimates$conifer,
+                                                                              total_carbon_estimates$coppice,
+                                                                              total_carbon_estimates$broadleaf))
+
+                        ggplot(carbon_chain_df, aes(x = Total_Carbon_per_Ha)) +
+                          geom_histogram(bins = 50, fill = "skyblue", color = "black", alpha = 0.7) +
+                          facet_wrap(~Habitat, scales = "free_x") +
+                          theme_minimal() +
+                          labs(title = "Total Carbon Distribution per Hectare by Habitat (Markov Chain)",
+                               x = "Total Carbon per Hectare (AGC)",
+                               y = "Frequency") +
+                          theme(strip.text = element_text(size = 12))
+
+                        ####
+
+                        # Calculate mean and standard deviation for each habitat
+                        mean_sd_results <- data.frame(
+                          Habitat = c("Conifer", "Coppice", "Broadleaf"),
+                          Mean_Carbon_per_Ha = c(mean(total_carbon_estimates$conifer),
+                                                 mean(total_carbon_estimates$coppice),
+                                                 mean(total_carbon_estimates$broadleaf)),
+                          SD_Carbon_per_Ha = c(sd(total_carbon_estimates$conifer),
+                                               sd(total_carbon_estimates$coppice),
+                                               sd(total_carbon_estimates$broadleaf))
+                        )
+
+                        # Print results for verification
+                        print(mean_sd_results)
+
+                        # Load ggplot2
+                        library(ggplot2)
+
+                        # Plot the data
+                        ggplot(mean_sd_results, aes(x = Habitat, y = Mean_Carbon_per_Ha,
+                                                    ymin = Mean_Carbon_per_Ha - SD_Carbon_per_Ha,
+                                                    ymax = Mean_Carbon_per_Ha + SD_Carbon_per_Ha)) +
+                          geom_bar(stat = "identity", fill = "skyblue", color = "black", alpha = 0.7) +
+                          geom_errorbar(width = 0.2) +
+                          theme_minimal() +
+                          labs(title = "Total Carbon per Hectare by Habitat",
+                               x = "Habitat",
+                               y = "Total Carbon per Hectare (AGC)") +
+                          theme(strip.text = element_text(size = 12))
+
+
+                        data <- df[, c("Genus","Species","TotalVolume_opt", "TotalVolume_std",
+                                       "Wood_Density", "Wood_Density_sd", "Habitat")]
+
+                        first_row_values <- as.numeric(data[1, 8:ncol(data)])
+                        plot(1:(ncol(data)-7), first_row_values, type = "l", xlab = "Iteration", ylab = "Value", main = "Markov Chain Values for Row 1")
+                        #first_row_values <- as.numeric(data[1, (ncol(data) - iterations + 1):ncol(data)])
+                        #plot(1:iterations, first_row_values, type = "l", xlab = "Iteration", ylab = "Value", main = "Markov Chain Values for Row 1")
+
+                        plot_data <- data.frame(Iteration = 1:length(first_row_values), Value = first_row_values)
+                        ggplot(plot_data, aes(x = factor(Iteration), y = Value)) +
+                          geom_bar(stat = "identity") +
+                          labs(title = "Markov Chain Values for Row 1 Ordered as Normal Distribution",
+                               x = "Iteration",
+                               y = "Carbon") +
+                          theme_minimal()
+
+                        ggplot(ID, aes(x=(TotalVolume))) +
+                          geom_histogram(color="black",bins = 50) +
+                          #geom_vline(xintercept=ID$TotalVolume[which(ID$OptVol == TRUE)])
+                          geom_vline(xintercept=sum(ID$opt.vol,na.rm=TRUE), color = "green") +
+                          geom_vline(xintercept= mu) +
+                          geom_vline(xintercept = mu - sd, color="red")+
+                          geom_vline(xintercept = mu + sd, color="red") +
+                          ggtitle(paste(ID$tree[1],", skewness: ",round(ID$skewness[1],3),
+                                        ", kurtosis: ",round(ID$kurtosis[1],3),
+                                        ", shapiro pval: ",round(ID$shapiro.pval,5), sep = ""))
+
+
+                        df$mean.markov <- rowMeans(data[, 8:(ncol(data))], na.rm = TRUE)
+
+
+                        ci_sd <- function(x) {
+                          # Calculate the mean and standard error of the mean
+                          #  mean_x <- as.numeric(x[3])
+                          #  sem_x <- as.numeric(x[4]) / sqrt(ncol(x)-7)
+
+                          mean_x <- mean(as.numeric(x[8:ncol(x)]))
+                          sem_x <- sd(as.numeric(x[8:ncol(x)])) / sqrt(ncol(x)-7)
+
+                          # Calculate the 95% confidence interval
+                          ci <- qnorm(0.975) * sem_x
+
+                          return(ci)
+                        }
+
+                        for(i in 1:nrow(df)){
+                          df$markov.sd <- ci_sd(data[i,])
+                        }
+
+                        # Apply the function to each column
+                        #markov_sd <- apply(data[8:ncol(data)], 2, ci_sd)
+
+                        # Add the result as a new column to df
+                        #df$markov.sd <- markov_sd
+
+                        plot(df$TotalVolume_opt)
+                        plot(df$mean.markov)
+
+                        df$sd.markov <- apply(data[, 8:107], 1, sd)
+                        plot(df$TotalVolume_sd, xlim=c(0,1000))
+                        plot(df$sd.markov)
+
+                        #	Every tree randomly sample:
+                        #	non parametric distribution for wd and
+                        #	mean and sd estimate of mass for each tree
+                        # repeat 10,000 times to get the plotwise distribution per hectar mass
+
+                        vector <- data[,8:107]
+                        vector <- as.vector(as.matrix(vector))
+                        plot(vector)
+
+
+                        write.csv()
