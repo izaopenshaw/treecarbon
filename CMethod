@@ -3,8 +3,20 @@ library(ggplot2)
 library(tidyr)
 library(car)
 library(ggrepel)
+
+# NA values in broadleaf plot 18 total volume
+# do we times TLS values by WD?
+# to check DBHs of trees
+# to add in Zanis equation
+# to check WCC lookup tables are same as my estimates: https://rbgkew-my.sharepoint.com/personal/i_openshaw_kew_org/Documents/Documents/RFiles/WCC
+# to add in Bunce, Spruce
+# WCC: update data file for splookup and CVF, errors, warnings
+# biomass and allodb function write up
+
 library(utils)
-#devtools::install_github("izaopenshaw/WoodlandCarbonCode", force = TRUE) # force = TRUE to install updates
+detach("WoodlandCarbonCode")
+remove.packages("WoodlandCarbonCode")
+devtools::install_github("izaopenshaw/WoodlandCarbonCode", force = TRUE) # force = TRUE to install updates
 library(WoodlandCarbonCode)
 
 #================= Import Stem maps ==================
@@ -77,11 +89,13 @@ df$DBH <- as.numeric(df$DBH)*100
 df$ID <- 1:nrow(df)
 
 #================= Calculate carbon using Biomass.R & allodb.R ==================
+#source("CarbonFunctions.R")
 coords <- c(-0.088837,51.071610)
 df <- biomass(df, coords, region="Europe", output.all = TRUE)
 df <- allodb(df, coords, output.all = TRUE)
 
 # Convert from biomass to carbon using the Carbon Volatile Fraction
+# TODO with function
 df$CVF[df$Classification=="broadleaf"] <- 48.8
 df$CVF[df$Classification=="coniferous"] <- 50.8 # Error = 0.6
 # Thomas, Sean C., and Adam R. Martin. "Carbon content of tree tissues: a synthesis." Forests 3.2 (2012): 332-352. https://www.mdpi.com/1999-4907/3/2/332.
@@ -94,8 +108,9 @@ df$TLS_sd  <- df$TotalVolume_std/1000*df$CVF
 
 #================= Calculate carbon using WCC ==================
 df$Classification[df$Classification == "coniferous"] <- "conifer"
+df$Name <- paste(df$Genus, df$Species)
 sp_codes <- lookspcode(as.character(df$Name), df$Classification, returnv = 'single')
-carbon <- fc_agc(sp_codes$spcode, df$DBH, df$Height)
+carbon <- fc_agc_error(sp_codes$spcode, df$DBH, df$Height)
 
 #==================== Plots ====================
 # Coefficient of Variation from TLS
