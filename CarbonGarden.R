@@ -89,4 +89,3 @@ ggplot(carbon_data, aes(x = Carbon_Type, y = Carbon_Value, fill = Carbon_Type)) 
     axis.text.x = element_text(angle = 45, hjust = 1),
     legend.position = "none"
   )
-
